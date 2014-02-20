@@ -377,7 +377,7 @@ class Qutepart(QPlainTextEdit):
     
     _globalSyntaxManager = SyntaxManager()
     
-    def __init__(self, *args):
+    def __init__(self, *args, **kwargs):
         QPlainTextEdit.__init__(self, *args)
         
         # toPlainText() takes a lot of time on long texts, therefore it is cached
@@ -411,9 +411,11 @@ class Qutepart(QPlainTextEdit):
         
         self._lines = Lines(self)
         
+        word_list = None
+        
         self.completionThreshold = self._DEFAULT_COMPLETION_THRESHOLD
         self.completionEnabled = self._DEFAULT_COMPLETION_ENABLED
-        self._completer = Completer(self)
+        self._completer = Completer(self, **kwargs)
         
         self._initActions()
         
@@ -1440,3 +1442,4 @@ def iterateBlocksBackFrom(block):
     while block.isValid():
         yield block
         block = block.previous()
+
