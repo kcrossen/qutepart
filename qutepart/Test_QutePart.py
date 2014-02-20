@@ -42,20 +42,15 @@ def main():
     
     window = QMainWindow()
     
-    qpart = Qutepart()
-    window.setCentralWidget(qpart)
-    
     wrdlst = ['SELECT', 'FROM', 'abc_db', 'def_db']
     parchidict = {'abc_db': ['ghi_tbl', 'jkl_tbl'],
                   'def_db': ['mno_tbl', 'pqr_tbl'],
                   'ghi_tbl': ['stu_col', 'vwx_col'],
                   'jkl_tbl': ['yza_col', 'bcd_col']}
 
-    qpart.completionThreshold = _DEFAULT_COMPLETION_THRESHOLD
-    qpart.completionEnabled = _DEFAULT_COMPLETION_ENABLED
-    qpart._completer = Completer(qpart,
-                                 ContentAutoComplete=False,
-                                 WordList=wrdlst, ParentChildDict=parchidict)
+    qpart = Qutepart(ContentAutoComplete=False,
+                     WordList=wrdlst, ParentChildDict=parchidict)
+    window.setCentralWidget(qpart)
 
     fnt = QFont()
     fnt.setFamily('Lucida Sans Unicode')
