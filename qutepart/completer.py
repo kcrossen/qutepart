@@ -9,30 +9,33 @@ from PyQt4.QtGui import QCursor, QListView, QStyle
 
 from qutepart.htmldelegate import HTMLDelegate
 
-# # krc: Detect end of 'identifier' OR 'identifier.'
-# _wordPattern = "\w+"
-# _wordRegExp = re.compile(_wordPattern)
-# _wordAtEndRegExp = re.compile(_wordPattern + '$')
-# _wordAtStartRegExp = re.compile('^' + _wordPattern)
-
 class _GlobalUpdateWordSetTimer:
     """Timer updates word set, when editor is idle. (5 sec. after last change)
     Timer is global, for avoid situation, when all instances
     update set simultaneously
     """
     _IDLE_TIMEOUT_MS = 1000
-    
+
     def __init__(self):
         self._timer = QTimer()
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._onTimer)
         self._scheduledMethods = []
-    
+
     def schedule(self, method):
         if not method in self._scheduledMethods:
             self._scheduledMethods.append(method)
         self._timer.start(self._IDLE_TIMEOUT_MS)
-    
+
+    def cancel(self, method):
+        """Cancel scheduled method
+        Safe method, may be called with not-scheduled method"""
+        if method in self._scheduledMethods:
+            self._scheduledMethods.remove(method)
+
+        if not self._scheduledMethods:
+            self._timer.stop()
+
     def _onTimer(self):
         method = self._scheduledMethods.pop()
         method()
@@ -42,14 +45,19 @@ class _GlobalUpdateWordSetTimer:
 
 class _CompletionModel(QAbstractItemModel):
     """QAbstractItemModel implementation for a list of completion variants
-    
+
     words attribute contains all words
     canCompleteText attribute contains text, which may be inserted with tab
     """
-    def __init__(self, wordSet):
+    def __init__(self, wordSet, CaseSensitive=True):
         QAbstractItemModel.__init__(self)
-        
+
         self._wordSet = wordSet
+
+        #krc: Some languages are case-insensitive
+        #krc: This _CompletionModel instance...
+        #krc: ...is either one or the other for it's entire life
+        self._CaseSensitive = CaseSensitive
 
     def setData(self, wordBeforeCursor, wholeWord):
         """Set model information
@@ -58,12 +66,12 @@ class _CompletionModel(QAbstractItemModel):
         self.words = self._makeListOfCompletions(wordBeforeCursor, wholeWord)
         commonStart = self._commonWordStart(self.words)
         self.canCompleteText = commonStart[len(wordBeforeCursor):]
-        
+
         self.layoutChanged.emit()
 
     def hasWords(self):
         return len(self.words) > 0
-    
+
     def data(self, index, role):
         """QAbstractItemModel method implementation
         """
@@ -84,12 +92,12 @@ class _CompletionModel(QAbstractItemModel):
                 return typed + rest
         else:
             return None
-    
+
     def rowCount(self, index = QModelIndex()):
         """QAbstractItemModel method implementation
         """
         return len(self.words)
-    
+
     def typedText(self):
         """Get current typed text
         """
@@ -101,7 +109,7 @@ class _CompletionModel(QAbstractItemModel):
         """
         if not words:
             return ''
-        
+
         length = 0
         firstWord = words[0]
         otherWords = words[1:]
@@ -109,22 +117,27 @@ class _CompletionModel(QAbstractItemModel):
             if not all([word[index] == char for word in otherWords]):
                 break
             length = index + 1
-        
+
         return firstWord[:length]
 
     def _makeListOfCompletions(self, wordBeforeCursor, wholeWord):
         """Make list of completions, which shall be shown
         """
-        # krc: WordList, ParentChildDict
-        lc_word_before_cursor = wordBeforeCursor.lower()
-        onlySuitable = [word for word in self._wordSet 
-                        # krc: WordList
-                        if ((len(lc_word_before_cursor) == 0) or
-                            (word.lower().startswith(lc_word_before_cursor) and 
-                             (word != wholeWord)))]
-        
+        if (self._CaseSensitive):
+            onlySuitable = [word for word in self._wordSet 
+                            if ((len(wordBeforeCursor) == 0) or
+                                (word.startswith(wordBeforeCursor) and 
+                                (word != wholeWord)))]
+        else:
+            #krc: Not all programming languages are case-sensitive
+            lc_word_before_cursor = wordBeforeCursor.lower()
+            onlySuitable = [word for word in self._wordSet 
+                            if ((len(lc_word_before_cursor) == 0) or
+                                (word.lower().startswith(lc_word_before_cursor) and 
+                                (word != wholeWord)))]
+
         return sorted(onlySuitable)
-    
+
     """Trivial QAbstractItemModel methods implementation
     """
     def flags(self, index):                                 return Qt.ItemIsEnabled | Qt.ItemIsSelectable
@@ -140,82 +153,82 @@ class _CompletionList(QListView):
     closeMe = pyqtSignal()
     itemSelected = pyqtSignal(int)
     tabPressed = pyqtSignal()
-    
+
     _MAX_VISIBLE_ROWS = 20  # no any technical reason, just for better UI
-    
-    _ROW_MARGIN = 6
-    
+
     def __init__(self, qpart, model):
         QListView.__init__(self, qpart.viewport())
+
+        self.setAttribute(Qt.WA_DeleteOnClose)
+
         self.setItemDelegate(HTMLDelegate(self))
-        
+
         self._qpart = qpart
         self.setFont(qpart.font())
-        
+
         self.setCursor(QCursor(Qt.PointingHandCursor))
         self.setFocusPolicy(Qt.NoFocus)
-        
+
         self.setModel(model)
-        
+
         self._selectedIndex = -1
-        
+
         # if cursor moved, we shall close widget, if its position (and model) hasn't been updated
-        self._closeIfNotUpdatedTimer = QTimer()
+        self._closeIfNotUpdatedTimer = QTimer(self)
         self._closeIfNotUpdatedTimer.setInterval(200)
         self._closeIfNotUpdatedTimer.setSingleShot(True)
 
         self._closeIfNotUpdatedTimer.timeout.connect(self._afterCursorPositionChanged)
-        
+
         qpart.installEventFilter(self)
-        
+
         qpart.cursorPositionChanged.connect(self._onCursorPositionChanged)
-        
+
         self.clicked.connect(lambda index: self.itemSelected.emit(index.row()))
-        
+
         self.updateGeometry()
         self.show()
-        
+
         qpart.setFocus()
-    
+
     def __del__(self):
         """Without this empty destructor Qt prints strange trace
             QObject::startTimer: QTimer can only be used with threads started with QThread
         when exiting
         """
         pass
-    
-    def del_(self):
+
+    def close(self):
         """Explicitly called destructor.
         Removes widget from the qpart
         """
         self._closeIfNotUpdatedTimer.stop()
         self._qpart.removeEventFilter(self)
         self._qpart.cursorPositionChanged.disconnect(self._onCursorPositionChanged)
-        
-        # if object is deleted synchronously, Qt crashes after it on events handling
-        QTimer.singleShot(0, lambda: self.setParent(None))
+
+        QListView.close(self)
 
     def sizeHint(self):
         """QWidget.sizeHint implementation
         Automatically resizes the widget according to rows count
-        
+
         FIXME very bad algorithm. Remove all this margins, if you can
         """
         width = max([self.fontMetrics().width(word) \
                         for word in self.model().words])
         width = width * 1.4  # FIXME bad hack. invent better formula
         width += 30  # margin
-        
+
         # drawn with scrollbar without +2. I don't know why
         rowCount = min(self.model().rowCount(), self._MAX_VISIBLE_ROWS)
-        height = (self.sizeHintForRow(0) * rowCount) + self._ROW_MARGIN
+        height = self.sizeHintForRow(0) * (rowCount + 0.5)  # + 0.5 row margin
 
         return QSize(width, height)
 
     def minimumHeight(self):
         """QWidget.minimumSizeHint implementation
         """
-        return self.sizeHintForRow(0) + self._ROW_MARGIN
+        return self.sizeHintForRow(0) * 1.5  # + 0.5 row margin
 
     def _horizontalShift(self):
         """List should be plased such way, that typed text in the list is under
@@ -229,17 +242,17 @@ class _CompletionList(QListView):
         """
         WIDGET_BORDER_MARGIN = 5
         SCROLLBAR_WIDTH = 30  # just a guess
-        
+
         sizeHint = self.sizeHint()
         width = sizeHint.width()
         height = sizeHint.height()
 
         cursorRect = self._qpart.cursorRect()
         parentSize = self.parentWidget().size()
-        
+
         spaceBelow = parentSize.height() - cursorRect.bottom() - WIDGET_BORDER_MARGIN
         spaceAbove = cursorRect.top() - WIDGET_BORDER_MARGIN
-        
+
         if height <= spaceBelow or \
            spaceBelow > spaceAbove:
             yPos = cursorRect.bottom()
@@ -255,13 +268,13 @@ class _CompletionList(QListView):
             yPos = max(3, cursorRect.top() - height)
 
         xPos = cursorRect.right() - self._horizontalShift()
-        
+
         if xPos + width + WIDGET_BORDER_MARGIN > parentSize.width():
             xPos = max(3, parentSize.width() - WIDGET_BORDER_MARGIN - width)
-        
+
         self.setGeometry(xPos, yPos, width, height)
         self._closeIfNotUpdatedTimer.stop()
-    
+
     def _onCursorPositionChanged(self):
         """Cursor position changed. Schedule closing.
         Timer will be stopped, if widget position is being updated
@@ -312,51 +325,57 @@ class Completer(QObject):
     """Object listens Qutepart widget events, computes and shows autocompletion lists
     """
     _globalUpdateWordSetTimer = _GlobalUpdateWordSetTimer()
-    
+
     _WORD_SET_UPDATE_MAX_TIME_SEC = 0.4
-    
-    # krc: WordList, ParentChildDict
-    def __init__(self, qpart, ContentAutoComplete=True, WordList=None, ParentChildDict=None):
+    #krc: Keyword arguments pythonically passed to Completer from outside QutePart
+    def __init__(self, qpart, ContentAutoComplete=True, 
+                              WordList=None, ParentChildDict=None, 
+                              CaseSensitive=True):
         QObject.__init__(self, qpart)
-        
+
         self._qpart = qpart
         self._widget = None
         self._completionOpenedManually = False
-        
-        # krc: WordList, ParentChildDict
+
+        self._wordSet = None
+        #krc: Block word sets based on document content if:
+        #krc: 1) The programmer disables it
+        #krc: 2) A static word list is provided, e.g. SQL keywords
+        #krc: 3) A parent/child dictionary is provided, e.g. table.column
         self._ContentAutoComplete = \
             (ContentAutoComplete and (WordList is None) and (ParentChildDict is None))
-        
-        # krc: WordList
+        #krc: Use after-instantiation update mechanism to initialize completer 
         self.updateWordList(WordList)
-                
-        # krc: ParentChildDict
         self.updateParentChildDict(ParentChildDict)
+        
+        #krc: Some languages are case-insensitive
+        self._CaseSensitive = CaseSensitive
 
         qpart.installEventFilter(self)
         qpart.textChanged.connect(self._onTextChanged)
-    
-    def __del__(self):
-        """Close completion widget, if exists
+
+        self.destroyed.connect(self.del_)
+
+    def del_(self):
+        """Object deleted. Cancel timer
         """
-        self._closeCompletion()
+        self._globalUpdateWordSetTimer.cancel(self._updateWordSet)
 
     def _onTextChanged(self):
         """Text in the qpart changed. Update word set"""
-        # Belt and suspenders, block this feature extravagantly
+        #krc: Block word sets based on document content
         if (not self._ContentAutoComplete): return
         self._globalUpdateWordSetTimer.schedule(self._updateWordSet)
 
     def _updateWordSet(self):
         """Make a set of words, which shall be completed, from text
         """
-        # Belt and suspenders, block this feature extravagantly
+        #krc: Block word sets based on document content
         if (not self._ContentAutoComplete): return
-
         self._wordSet = set()
-        
+
         start = time.time()
-        
+
         for line in self._qpart.lines:
             for match in self._wordRegExp.findall(line):
                 self._wordSet.add(match)
@@ -364,7 +383,8 @@ class Completer(QObject):
                 """It is better to have incomplete word set, than to freeze the GUI"""
                 break
 
-    # krc: WordList
+    #krc: Dynamic changes to static WordList, ...
+    #krc: ...potentially different database entities to autocomplete
     def updateWordList(self, WordList):
         if (WordList is None):
             self._wordSet = None
@@ -373,11 +393,14 @@ class Completer(QObject):
             for word in WordList:
                 self._wordSet.add(word)
 
-    # krc: ParentChildDict
+    #krc: Dynamic changes to ParentChildDict, ...
+    #krc: ...potentially different database entities to autocomplete
     def updateParentChildDict(self, ParentChildDict):
         if (ParentChildDict is None):
             self._parentChildDict = None
-            # krc: Detect end of 'identifier'
+            #krc: Detect end of 'identifier'
+            #krc: This is the same as your code except the RegEx is not shared (global).
+            #krc: Each completer instance may have a different word definition.
             self._wordPattern = "\w+"
             self._wordRegExp = re.compile(self._wordPattern)
             self._wordAtEndRegExp = re.compile(self._wordPattern + '$')
@@ -390,7 +413,7 @@ class Completer(QObject):
                     child_set.add(child)
                 self._parentChildDict[parent] = child_set
     
-            # krc: Detect end of 'identifier' OR 'identifier.'
+            #krc: Detect end of 'identifier' OR 'identifier.'
             self._wordPattern = "\w+[.]?\w*"
             self._wordRegExp = re.compile(self._wordPattern)
             self._wordAtEndRegExp = re.compile(self._wordPattern + '$')
@@ -406,16 +429,16 @@ class Completer(QObject):
         """
         if event.type() == QEvent.KeyRelease:
             text = event.text()
-            textTyped = (event.modifiers() in (Qt.NoModifier, Qt.ShiftModifier)) and \
-                        (text.isalpha() or text.isdigit() or (text == '_') or
-                         # krc: Detect end of 'identifier' OR 'identifier.'
-                         ((text == '.') and (self._parentChildDict is not None)))
-            
+            textTyped = ((event.modifiers() in (Qt.NoModifier, Qt.ShiftModifier)) and 
+                         # Detect 'identifier' in most programming languages
+                         (text.isalpha() or text.isdigit() or (text == '_') or
+                          #krc: Detect end of 'identifier' OR 'identifier.'
+                          ((text == '.') and (self._parentChildDict is not None))))
             if textTyped or \
             (event.key() == Qt.Key_Backspace and self._widget is not None):
                 self._invokeCompletionIfAvailable()
                 return False
-        
+
         return False
 
     def _invokeCompletionIfAvailable(self, requestedByUser=False):
@@ -427,7 +450,12 @@ class Completer(QObject):
             wordBeforeCursor = self._wordBeforeCursor()
             wholeWord = wordBeforeCursor + self._wordAfterCursor()
 
-            # krc: ParentChildDict
+            #krc: ParentChildDict
+            #krc: Here we have to look for two things, a parent identifier, ...
+            #krc: for example, a table name which yields a word list... 
+            #krc: ...consisting of column names. This list is narrowed down...
+            #krc: ...as the user types characters after the dot.
+            #krc: This is a dynamic word set based on the identifier before the dot.
             if (('.' in wordBeforeCursor) and 
                 (len(wordBeforeCursor.split('.')[0]) >= 2) and 
                 (len(wordBeforeCursor.split('.')[1]) >= 0)):
@@ -435,8 +463,9 @@ class Completer(QObject):
                     (wordBeforeCursor.split('.')[0] in self._parentChildDict)):
                     child_set = self._parentChildDict[wordBeforeCursor.split('.')[0]]
                     if self._widget is None:
-                        model = _CompletionModel(child_set)
-                        model.setData(wordBeforeCursor.split('.')[1], wholeWord)
+                        model = _CompletionModel(child_set, CaseSensitive=self._CaseSensitive)
+                        #krc: wholeWord.split('.')[1], otherwise will not close on [Tab]
+                        model.setData(wordBeforeCursor.split('.')[1], wholeWord.split('.')[1])
                         if model.hasWords():
                             self._widget = _CompletionList(self._qpart, model)
                             self._widget.closeMe.connect(self._closeCompletion)
@@ -444,17 +473,20 @@ class Completer(QObject):
                             self._widget.tabPressed.connect(self._onCompletionListTabPressed)
                             return True
                     else:
-                        self._widget.model().setData(wordBeforeCursor.split('.')[1], wholeWord)
+                        #krc: wholeWord.split('.')[1], otherwise will not close on [Tab]
+                        self._widget.model().setData(wordBeforeCursor.split('.')[1], 
+                                                     wholeWord.split('.')[1])
                         if self._widget.model().hasWords():
                             self._widget.updateGeometry()
                             return True
 
-            elif wordBeforeCursor:
+            elif (wordBeforeCursor and (self._wordSet is not None)):
+                #krc: This implements a static word set based on reserved words, etc.
                 if len(wordBeforeCursor) >= self._qpart.completionThreshold or \
                    self._completionOpenedManually or \
                    requestedByUser:
                     if self._widget is None:
-                        model = _CompletionModel(self._wordSet)
+                        model = _CompletionModel(self._wordSet, CaseSensitive=self._CaseSensitive)
                         model.setData(wordBeforeCursor, wholeWord)
                         if model.hasWords():
                             self._widget = _CompletionList(self._qpart, model)
@@ -467,7 +499,7 @@ class Completer(QObject):
                         if self._widget.model().hasWords():
                             self._widget.updateGeometry()
                             return True
-        
+
         self._closeCompletion()
         return False
 
@@ -476,10 +508,10 @@ class Completer(QObject):
         Delete widget
         """
         if self._widget is not None:
-            self._widget.del_()
+            self._widget.close()
             self._widget = None
             self._completionOpenedManually = False
-    
+
     def _wordBeforeCursor(self):
         """Get word, which is located before cursor
         """
@@ -490,9 +522,9 @@ class Completer(QObject):
             return match.group(0)
         else:
             return ''
-    
+
     def _wordAfterCursor(self):
-        """Get word, which is located after cursor
+        """Get word, which is located before cursor
         """
         cursor = self._qpart.textCursor()
         textAfterCursor = cursor.block().text()[cursor.positionInBlock():]
@@ -501,7 +533,7 @@ class Completer(QObject):
             return match.group(0)
         else:
             return ''
-    
+
     def _onCompletionListItemSelected(self, index):
         """Item selected. Insert completion to editor
         """
