@@ -118,6 +118,7 @@ class _CompletionModel(QAbstractItemModel):
     def _makeListOfCompletions(self, wordBeforeCursor, wholeWord):
         """Make list of completions, which shall be shown
         """
+        #krc: Case insensitive, not all programming languages are case-sensitive
         lc_word_before_cursor = wordBeforeCursor.lower()
         onlySuitable = [word for word in self._wordSet 
                         if ((len(lc_word_before_cursor) == 0) or
