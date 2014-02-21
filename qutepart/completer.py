@@ -9,13 +9,6 @@ from PyQt4.QtGui import QCursor, QListView, QStyle
 
 from qutepart.htmldelegate import HTMLDelegate
 
-
-_wordPattern = "\w+"
-_wordRegExp = re.compile(_wordPattern)
-_wordAtEndRegExp = re.compile(_wordPattern + '$')
-_wordAtStartRegExp = re.compile('^' + _wordPattern)
-
-
 class _GlobalUpdateWordSetTimer:
     """Timer updates word set, when editor is idle. (5 sec. after last change)
     Timer is global, for avoid situation, when all instances
@@ -125,10 +118,11 @@ class _CompletionModel(QAbstractItemModel):
     def _makeListOfCompletions(self, wordBeforeCursor, wholeWord):
         """Make list of completions, which shall be shown
         """
-        onlySuitable = [word for word in self._wordSet \
-                                if word.startswith(wordBeforeCursor) and \
-                                   word != wholeWord]
-
+        lc_word_before_cursor = wordBeforeCursor.lower()
+        onlySuitable = [word for word in self._wordSet 
+                        if ((len(lc_word_before_cursor) == 0) or
+                            (word.lower().startswith(lc_word_before_cursor) and 
+                             (word != wholeWord)))]
         return sorted(onlySuitable)
 
     """Trivial QAbstractItemModel methods implementation
@@ -320,8 +314,8 @@ class Completer(QObject):
     _globalUpdateWordSetTimer = _GlobalUpdateWordSetTimer()
 
     _WORD_SET_UPDATE_MAX_TIME_SEC = 0.4
-
-    def __init__(self, qpart):
+    #krc: Keyword arguments pythonically passed to Completer from outside QutePart
+    def __init__(self, qpart, ContentAutoComplete=True, WordList=None, ParentChildDict=None):
         QObject.__init__(self, qpart)
 
         self._qpart = qpart
@@ -329,6 +323,15 @@ class Completer(QObject):
         self._completionOpenedManually = False
 
         self._wordSet = None
+        #krc: Block word sets based on document content if:
+        #krc: 1) The programmer disables it
+        #krc: 2) A static word list is provided, e.g. SQL keywords
+        #krc: 3) A parent/child dictionary is provided, e.g. table.column
+        self._ContentAutoComplete = \
+            (ContentAutoComplete and (WordList is None) and (ParentChildDict is None))
+        #krc: Use after-instantiation update mechanism to initialize completer 
+        self.updateWordList(WordList)
+        self.updateParentChildDict(ParentChildDict)
 
         qpart.installEventFilter(self)
         qpart.textChanged.connect(self._onTextChanged)
@@ -342,21 +345,61 @@ class Completer(QObject):
 
     def _onTextChanged(self):
         """Text in the qpart changed. Update word set"""
+        #krc: Block word sets based on document content
+        if (not self._ContentAutoComplete): return
         self._globalUpdateWordSetTimer.schedule(self._updateWordSet)
 
     def _updateWordSet(self):
         """Make a set of words, which shall be completed, from text
         """
+        #krc: Block word sets based on document content
+        if (not self._ContentAutoComplete): return
         self._wordSet = set()
 
         start = time.time()
 
         for line in self._qpart.lines:
-            for match in _wordRegExp.findall(line):
+            for match in self._wordRegExp.findall(line):
                 self._wordSet.add(match)
             if time.time() - start > self._WORD_SET_UPDATE_MAX_TIME_SEC:
                 """It is better to have incomplete word set, than to freeze the GUI"""
                 break
+
+    #krc: Dynamic changes to static WordList, ...
+    #krc: ...potentially different database entities to autocomplete
+    def updateWordList(self, WordList):
+        if (WordList is None):
+            self._wordSet = None
+        else:
+            self._wordSet = set()
+            for word in WordList:
+                self._wordSet.add(word)
+
+    #krc: Dynamic changes to ParentChildDict, ...
+    #krc: ...potentially different database entities to autocomplete
+    def updateParentChildDict(self, ParentChildDict):
+        if (ParentChildDict is None):
+            self._parentChildDict = None
+            #krc: Detect end of 'identifier'
+            #krc: This is the same as your code except the RegEx is not shared (global).
+            #krc: Each completer instance may have a different word definition.
+            self._wordPattern = "\w+"
+            self._wordRegExp = re.compile(self._wordPattern)
+            self._wordAtEndRegExp = re.compile(self._wordPattern + '$')
+            self._wordAtStartRegExp = re.compile('^' + self._wordPattern)
+        else:
+            self._parentChildDict = {}
+            for parent, child_list in ParentChildDict.items():
+                child_set = set()
+                for child in child_list:
+                    child_set.add(child)
+                self._parentChildDict[parent] = child_set
+    
+            #krc: Detect end of 'identifier' OR 'identifier.'
+            self._wordPattern = "\w+[.]?\w*"
+            self._wordRegExp = re.compile(self._wordPattern)
+            self._wordAtEndRegExp = re.compile(self._wordPattern + '$')
+            self._wordAtStartRegExp = re.compile('^' + self._wordPattern)
 
     def invokeCompletion(self):
         """Invoke completion manually"""
@@ -368,9 +411,11 @@ class Completer(QObject):
         """
         if event.type() == QEvent.KeyRelease:
             text = event.text()
-            textTyped = (event.modifiers() in (Qt.NoModifier, Qt.ShiftModifier)) and \
-                        (text.isalpha() or text.isdigit() or text == '_')
-
+            textTyped = ((event.modifiers() in (Qt.NoModifier, Qt.ShiftModifier)) and 
+                         # Detect 'identifier' in most programming languages
+                         (text.isalpha() or text.isdigit() or (text == '_') or
+                          #krc: Detect end of 'identifier' OR 'identifier.'
+                          ((text == '.') and (self._parentChildDict is not None))))
             if textTyped or \
             (event.key() == Qt.Key_Backspace and self._widget is not None):
                 self._invokeCompletionIfAvailable()
@@ -382,11 +427,40 @@ class Completer(QObject):
         """Invoke completion, if available. Called after text has been typed in qpart
         Returns True, if invoked
         """
-        if self._qpart.completionEnabled and self._wordSet is not None:
+        if (self._qpart.completionEnabled and 
+            ((self._wordSet is not None) or (self._parentChildDict is not None))):
             wordBeforeCursor = self._wordBeforeCursor()
             wholeWord = wordBeforeCursor + self._wordAfterCursor()
 
-            if wordBeforeCursor:
+            #krc: ParentChildDict
+            #krc: Here we have to look for two things, a parent identifier, ...
+            #krc: for example, a table name which yields a word list... 
+            #krc: ...consisting of column names. This list is narrowed down...
+            #krc: ...as the user types characters after the dot.
+            #krc: This is a dynamic word set based on the identifier before the dot.
+            if (('.' in wordBeforeCursor) and 
+                (len(wordBeforeCursor.split('.')[0]) >= 2) and 
+                (len(wordBeforeCursor.split('.')[1]) >= 0)):
+                if ((self._parentChildDict is not None) and
+                    (wordBeforeCursor.split('.')[0] in self._parentChildDict)):
+                    child_set = self._parentChildDict[wordBeforeCursor.split('.')[0]]
+                    if self._widget is None:
+                        model = _CompletionModel(child_set)
+                        model.setData(wordBeforeCursor.split('.')[1], wholeWord)
+                        if model.hasWords():
+                            self._widget = _CompletionList(self._qpart, model)
+                            self._widget.closeMe.connect(self._closeCompletion)
+                            self._widget.itemSelected.connect(self._onCompletionListItemSelected)
+                            self._widget.tabPressed.connect(self._onCompletionListTabPressed)
+                            return True
+                    else:
+                        self._widget.model().setData(wordBeforeCursor.split('.')[1], wholeWord)
+                        if self._widget.model().hasWords():
+                            self._widget.updateGeometry()
+                            return True
+
+            elif (wordBeforeCursor and (self._wordSet is not None)):
+                #krc: This implements a static word set based on reserved words, etc.
                 if len(wordBeforeCursor) >= self._qpart.completionThreshold or \
                    self._completionOpenedManually or \
                    requestedByUser:
@@ -422,7 +496,7 @@ class Completer(QObject):
         """
         cursor = self._qpart.textCursor()
         textBeforeCursor = cursor.block().text()[:cursor.positionInBlock()]
-        match = _wordAtEndRegExp.search(textBeforeCursor)
+        match = self._wordAtEndRegExp.search(textBeforeCursor)
         if match:
             return match.group(0)
         else:
@@ -433,7 +507,7 @@ class Completer(QObject):
         """
         cursor = self._qpart.textCursor()
         textAfterCursor = cursor.block().text()[cursor.positionInBlock():]
-        match = _wordAtStartRegExp.search(textAfterCursor)
+        match = self._wordAtStartRegExp.search(textAfterCursor)
         if match:
             return match.group(0)
         else:
