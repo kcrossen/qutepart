@@ -5,7 +5,7 @@ import re
 import time
 
 from PyQt4.QtCore import pyqtSignal, QAbstractItemModel, QEvent, QModelIndex, QObject, QSize, Qt, QTimer, Qt
-from PyQt4.QtGui import QCursor, QListView, QStyle
+from PyQt4.QtGui import QCursor, QListView, QStyle, QTextCursor
 
 from qutepart.htmldelegate import HTMLDelegate
 
@@ -330,7 +330,7 @@ class Completer(QObject):
     #krc: Keyword arguments pythonically passed to Completer from outside QutePart
     def __init__(self, qpart, ContentAutoComplete=True, 
                               WordList=None, ParentChildDict=None, 
-                              CaseSensitive=True):
+                              CaseSensitive=True, EnforceAutoCompleteCasing=False):
         QObject.__init__(self, qpart)
 
         self._qpart = qpart
@@ -350,6 +350,9 @@ class Completer(QObject):
         
         #krc: Some languages are case-insensitive
         self._CaseSensitive = CaseSensitive
+        
+        #krc: Enforce casing (upper, lower, mixed) of WordList and ParentChildDict
+        self._EnforceAutoCompleteCasing = EnforceAutoCompleteCasing
 
         qpart.installEventFilter(self)
         qpart.textChanged.connect(self._onTextChanged)
@@ -539,7 +542,17 @@ class Completer(QObject):
         """
         model = self._widget.model()
         selectedWord = model.words[index]
-        textToInsert = selectedWord[len(model.typedText()):]
+        if (self._EnforceAutoCompleteCasing):
+            textToInsert = selectedWord
+            text_cursor = self._qpart.textCursor()
+            text_cursor.movePosition(QTextCursor.PreviousCharacter,
+                                     QTextCursor.KeepAnchor,
+                                     len(model.typedText()))
+            self._qpart.setTextCursor(text_cursor)
+            self._qpart.textCursor().removeSelectedText()
+        else:
+            textToInsert = selectedWord[len(model.typedText()):]
+
         self._qpart.textCursor().insertText(textToInsert)
         self._closeCompletion()
 
@@ -549,5 +562,19 @@ class Completer(QObject):
         """
         canCompleteText = self._widget.model().canCompleteText
         if canCompleteText:
-            self._qpart.textCursor().insertText(canCompleteText)
-            self._invokeCompletionIfAvailable()
+            if (self._EnforceAutoCompleteCasing):
+                model = self._widget.model()
+                #krc: There can now be only one word in list
+                selectedWord = model.words[0]
+                text_cursor = self._qpart.textCursor()
+                text_cursor.movePosition(QTextCursor.PreviousCharacter,
+                                         QTextCursor.KeepAnchor,
+                                         len(model.typedText()))
+                self._qpart.setTextCursor(text_cursor)
+                self._qpart.textCursor().removeSelectedText()
+                self._qpart.textCursor().insertText(selectedWord)
+            else:
+                self._qpart.textCursor().insertText(canCompleteText)
+
+            #krc: self._invokeCompletionIfAvailable()
+            self._closeCompletion()
