@@ -49,7 +49,8 @@ def main():
                   'jkl_tbl': ['yza_col', 'bcd_col']}
 
     qpart = Qutepart(ContentAutoComplete=False,
-                     WordList=wrdlst, ParentChildDict=parchidict)
+                     WordList=wrdlst, ParentChildDict=parchidict, 
+                     CaseSensitive=False)
     window.setCentralWidget(qpart)
 
     fnt = QFont()
